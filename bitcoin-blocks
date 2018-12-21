@@ -1,0 +1,227 @@
+#! /usr/bin/perl -w
+use strict;
+
+# bitcoin-blocks: a script to parse Bitcoin block header data
+# Copyright 2018 by Nathaniel Eldredge
+# Released under GPL v3; see accompanying file LICENSE
+
+use Digest::SHA qw(sha256 sha256_hex);
+use BSD::Resource;
+use Getopt::Std;
+
+my $testnet_magic = 0x0B110907;
+my $mainnet_magic = 0xF9BEB4D9;
+
+
+sub usage {
+    print STDERR 
+	"Usage: $0 [-i | -d | -t] [-s] block-files... \n" .
+	"-i: Output csv index of blocks and header data to stdout (default)\n" .
+	"-d: Dump raw blocks, in order, to stdout\n" .
+	"-t: Test whether all blocks are in order\n" .
+	"-s: Include side chain blocks (not in longest chain)\n"
+	;
+    exit 1;
+}
+
+
+	
+my %opts;
+
+getopts("idtsh", \%opts);
+
+usage() if ($opts{'h'});
+
+my $mode = 'INDEX';
+my $include_sidechains = 0;
+
+if ($opts{'i'}) {
+    $mode = 'INDEX';
+} elsif ($opts{'d'}) {
+    $mode = 'DUMP';
+} elsif ($opts{'t'}) {
+    $mode = 'TEST';
+    $include_sidechains = 1;
+} else {
+    usage();
+}
+
+$include_sidechains = 1 if ($opts{'s'});
+
+my %blocks;
+my $tip_height = -1;
+my $tip;
+
+sub revhash {
+    return join ('', reverse split (/(..)/, $_[0]));
+}
+
+sub organize {
+    my ($hash) = @_;
+    my @stack;
+    my $h = $hash;
+    until (!defined($blocks{$h}) or defined($blocks{$h}->{height})) {
+	unshift @stack, $h;
+	$h = $blocks{$h}->{prevhash};
+    }
+    my ($ht, $head);
+    if (defined($blocks{$h})) {
+	# Block already known
+	$ht = $blocks{$h}->{height};
+	$head = $blocks{$h}->{head};
+    } else {
+	$ht = -1;
+	$head = $h;
+    }
+    foreach my $k (@stack) {
+	$blocks{$k}->{height} = ++$ht;
+	$blocks{$k}->{head} = $head;
+    }
+    return $ht;
+}
+
+sub process_file {
+    my ($fname) = @_;
+    print STDERR "Processing $fname...\n";
+    my $fh;
+    open($fh, "< :raw", $fname)
+	or die "$fname: $!";
+    my ($r, $lenbuf, $pos);
+  BLOCK:
+    while ($pos = tell($fh), ($r = read($fh, $lenbuf, 8)) == 8) {
+	my ($magic, $len) = unpack('NV', $lenbuf);
+	# testnet
+	if ($magic != $testnet_magic and $magic != $mainnet_magic) {
+	    if ($magic == 0) {
+		# print STDERR "8 bytes of zeros in $fname at $pos, skipping\n";
+		next BLOCK;
+	    }
+	    my $magic_hex = sprintf("%#0x", $magic);
+	    die("Bad magic $magic_hex in $fname at $pos");
+	}
+	my $headerbuf;
+	if (read($fh, $headerbuf, 80) != 80) {
+	    die("short read in $fname");
+	}
+	my $hash = revhash(sha256_hex(sha256($headerbuf)));
+	my ($version, $prevhash, $merkleroot, $time, $bits, $nonce) = unpack('VH64H64VVV', $headerbuf);
+	$prevhash = revhash($prevhash);
+	my $totallen = $len + 8;
+	
+	$blocks{$hash} = { filename => $fname,
+			   pos => $pos,
+			   len => $totallen,
+			   version => $version,
+			   prevhash => $prevhash,
+			   merkleroot => $merkleroot,
+			   time => $time,
+			   bits => $bits,
+			   nonce => $nonce };
+	
+	seek($fh, $pos+$totallen, 0);
+  }
+    close($fh);
+}
+
+my @chain;
+my $genesis;
+
+sub organize_all_blocks {
+    print STDERR "Organizing the chain...\n";
+    
+    foreach my $h (keys %blocks) {
+	my $ht = organize($h);
+	if ($ht > $tip_height) {
+	    $tip_height = $ht;
+	    $tip = $h;
+	}
+    }
+    print STDERR "Marking main chain...\n";
+    
+    $genesis = $blocks{$tip}->{head};
+
+    my @main_unsorted;
+    # Mark main chain
+    for (my $h = $tip; $blocks{$h}; $h = $blocks{$h}->{prevhash}) {
+	$blocks{$h}->{chain} = 'main';
+	push @main_unsorted, $h;
+    }
+    
+    print STDERR "Sorting blocks...\n";
+    
+    @chain = sort { $blocks{$a}->{height} <=> $blocks{$b}->{height} } @main_unsorted;
+    
+    if ($include_sidechains) {
+	my @side_unsorted;
+	foreach my $h (keys %blocks) {
+	    if (!$blocks{$h}->{chain}) {
+		$blocks{$h}->{chain} = 'side';
+		push @side_unsorted, $h;
+	    }
+	}
+	push @chain, sort { 	
+	    $blocks{$a}->{head} cmp $blocks{$b}->{head}
+	    or
+		$blocks{$a}->{height} <=> $blocks{$b}->{height}
+	} @side_unsorted;
+    }
+}
+
+sub write_index {
+    print STDERR "Writing out index...\n";
+    print "filename,pos,len,version,hash,prevhash,merkleroot,time,bits,nonce,head,height,chain\n";
+    foreach my $h (@chain) {
+	my $b = $blocks{$h};
+	print "$b->{filename},$b->{pos},$b->{len},$b->{version},$h,$b->{prevhash}," . 
+	    "$b->{merkleroot},$b->{time},$b->{bits},$b->{nonce},$b->{head}," .
+	    "$b->{height},$b->{chain}\n";
+    }
+}
+
+sub test_order {
+    my $inorder = 1;
+    my $lastpos = -1;
+    foreach my $h (@chain) {
+	my $pos = $blocks{$h}->{pos};
+	if ($pos < $lastpos) {
+	    print STDERR "Block out of order at position $pos\n";
+	    $inorder = 0;
+	}
+	$lastpos = $pos;
+    }
+    return $inorder;
+}
+
+sub dump_blocks {
+    print STDERR "Writing blocks...\n";
+    
+    binmode(STDOUT);
+    
+    foreach my $h (@chain) {
+	my $b = $blocks{$h};
+	my ($fh, $buf);
+	my $fname = $b->{filename};
+	open($fh, "< :raw", $fname)
+	    or die "$fname: $!";
+	
+	seek($fh, $b->{pos}, 0);
+	read($fh, $buf, $b->{len});
+	print $buf;
+	close($fh);
+    }
+}
+
+foreach my $fn (@ARGV) {
+    process_file($fn);
+}
+
+organize_all_blocks();
+
+
+if ($mode eq 'INDEX') {
+    write_index();
+} elsif ($mode eq 'TEST') {
+    exit (test_order() ? 0 : 2);
+} elsif ($mode eq 'DUMP') {
+    dump_blocks();
+}

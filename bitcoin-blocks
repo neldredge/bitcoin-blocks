@@ -6,7 +6,6 @@ use strict;
 # Released under GPL v3; see accompanying file LICENSE
 
 use Digest::SHA qw(sha256 sha256_hex);
-use BSD::Resource;
 use Getopt::Std;
 
 my $testnet_magic = 0x0B110907;
@@ -16,7 +15,7 @@ my $mainnet_magic = 0xF9BEB4D9;
 sub usage {
     print STDERR 
 	"Usage: $0 [-i | -d | -t] [-s] block-files... \n" .
-	"-i: Output csv index of blocks and header data to stdout (default)\n" .
+	"-i: Output csv index of blocks and header data to stdout\n" .
 	"-d: Dump raw blocks, in order, to stdout\n" .
 	"-t: Test whether all blocks are in order\n" .
 	"-s: Include side chain blocks (not in longest chain)\n"
@@ -35,14 +34,24 @@ usage() if ($opts{'h'});
 my $mode = 'INDEX';
 my $include_sidechains = 0;
 
+my $modes = 0;
+
 if ($opts{'i'}) {
     $mode = 'INDEX';
-} elsif ($opts{'d'}) {
+    $modes++;
+}
+if ($opts{'d'}) {
     $mode = 'DUMP';
-} elsif ($opts{'t'}) {
+    $modes++;
+}
+if ($opts{'t'}) {
     $mode = 'TEST';
     $include_sidechains = 1;
-} else {
+    $modes++;
+}
+
+if ($modes != 1) {
+    print STDERR "Error: Must give exactly one of -i, -d, -t\n";
     usage();
 }
 

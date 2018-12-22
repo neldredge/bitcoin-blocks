@@ -65,7 +65,7 @@ sub revhash {
     return join ('', reverse split (/(..)/, $_[0]));
 }
 
-sub organize {
+sub trace_to_head {
     my ($hash) = @_;
     my @stack;
     my $h = $hash;
@@ -73,18 +73,15 @@ sub organize {
 	unshift @stack, $h;
 	$h = $blocks{$h}->{prevhash};
     }
-    my ($ht, $head);
+    my $ht;
     if (defined($blocks{$h})) {
 	# Block already known
 	$ht = $blocks{$h}->{height};
-	$head = $blocks{$h}->{head};
     } else {
 	$ht = -1;
-	$head = $h;
     }
     foreach my $k (@stack) {
 	$blocks{$k}->{height} = ++$ht;
-	$blocks{$k}->{head} = $head;
     }
     return $ht;
 }
@@ -133,56 +130,42 @@ sub process_file {
 }
 
 my @chain;
-my $genesis;
 
 sub organize_all_blocks {
     print STDERR "Organizing the chain...\n";
     
     foreach my $h (keys %blocks) {
-	my $ht = organize($h);
+	my $ht = trace_to_head($h);
 	if ($ht > $tip_height) {
 	    $tip_height = $ht;
 	    $tip = $h;
 	}
     }
-    print STDERR "Marking main chain...\n";
+    print STDERR "Finding main chain...\n";
     
-    $genesis = $blocks{$tip}->{head};
-
-    my @main_unsorted;
     # Mark main chain
     for (my $h = $tip; $blocks{$h}; $h = $blocks{$h}->{prevhash}) {
 	$blocks{$h}->{chain} = 'main';
-	push @main_unsorted, $h;
+	unshift @chain, $h;
     }
-    
-    print STDERR "Sorting blocks...\n";
-    
-    @chain = sort { $blocks{$a}->{height} <=> $blocks{$b}->{height} } @main_unsorted;
-    
+
     if ($include_sidechains) {
-	my @side_unsorted;
 	foreach my $h (keys %blocks) {
 	    if (!$blocks{$h}->{chain}) {
 		$blocks{$h}->{chain} = 'side';
-		push @side_unsorted, $h;
+		push @chain, $h;
 	    }
 	}
-	push @chain, sort { 	
-	    $blocks{$a}->{head} cmp $blocks{$b}->{head}
-	    or
-		$blocks{$a}->{height} <=> $blocks{$b}->{height}
-	} @side_unsorted;
     }
 }
 
 sub write_index {
     print STDERR "Writing out index...\n";
-    print "filename,pos,len,version,hash,prevhash,merkleroot,time,bits,nonce,head,height,chain\n";
+    print "filename,pos,len,version,hash,prevhash,merkleroot,time,bits,nonce,height,chain\n";
     foreach my $h (@chain) {
 	my $b = $blocks{$h};
 	print "$b->{filename},$b->{pos},$b->{len},$b->{version},$h,$b->{prevhash}," . 
-	    "$b->{merkleroot},$b->{time},$b->{bits},$b->{nonce},$b->{head}," .
+	    "$b->{merkleroot},$b->{time},$b->{bits},$b->{nonce}," .
 	    "$b->{height},$b->{chain}\n";
     }
 }
